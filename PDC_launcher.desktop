@@ -2,8 +2,8 @@
 Version=1.0
 Type=Application
 Name=PDC Demo
-Comment=Sync folder to pxslogin and run slurmlauncher
-Exec=bash -c 'DIR=/home/sw/pdc-demo && ssh pxslogin "mkdir -p ~/.slurmlauncher_tmp" && scp -r "$DIR"/. pxslogin:~/.slurmlauncher_tmp/ && ssh -t -Y pxslogin "cd ~/.slurmlauncher_tmp && ./launcher/slurmlauncher"'
+Comment=Launch sandboxed applications on PDC cluster
+Exec=bash -c 'ssh -t -Y pxslogin "cd ~/pdc-demo && ./launcher/slurmlauncher"'
 Icon=pdc-demo
 Terminal=false
 Categories=Utility;

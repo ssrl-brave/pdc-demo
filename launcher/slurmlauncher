@@ -7,7 +7,7 @@ export DBUS_SESSION_BUS_ADDRESS=/dev/null
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE_NAME="$(openssl rand -hex 7)"
-WORKSPACE_DIR="$PROJECT_DIR/$WORKSPACE_NAME"
+WORKSPACE_DIR="$HOME/.pdc-demo-workspaces/$WORKSPACE_NAME"
 
 declare -A app_commands=(
      ["xeyes"]="xeyes"
