@@ -1,0 +1,229 @@
+#!/bin/bash
+source /etc/profile.d/modules.sh 2>/dev/null || true
+unset LD_LIBRARY_PATH
+export GDK_BACKEND=x11
+export DBUS_SESSION_BUS_ADDRESS=/dev/null
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKSPACE_NAME="$(openssl rand -hex 7)"
+WORKSPACE_DIR="$PROJECT_DIR/$WORKSPACE_NAME"
+
+declare -A app_commands=(
+     ["xeyes"]="xeyes"
+     ["xclock"]="xclock"
+     ["terminal"]="xfce4-terminal --disable-server"
+     ["pyMOL"]="pymol"
+     ["moe"]="moe"
+)
+
+CHOICE=$(zenity --list --radiolist \
+     --title="Demo Software Menu" \
+     --column="Select" --column="Application" \
+     --print-column=2 \
+     "TRUE" "moe" \
+     "FALSE" "xeyes" \
+     "FALSE" "terminal" \
+     "FALSE" "pyMOL" 2>/dev/null | awk -F'|' '{print $NF}')
+
+if [ -z "$CHOICE" ]; then exit 1; fi
+
+CMD="${app_commands[$CHOICE]}"
+
+if [ -z "$CMD" ]; then
+     zenity --error --text="Error: Could not resolve command for $CHOICE."
+     exit 1
+fi
+
+if [ "$CHOICE" == "moe" ]; then
+     module load moe
+fi
+
+mkdir -p "$WORKSPACE_DIR"/{home,tmp}
+
+APP_TEMPLATE_DIR="$PROJECT_DIR/templates/$CHOICE"
+
+if [ -d "$APP_TEMPLATE_DIR" ]; then
+    cp -r "$APP_TEMPLATE_DIR/." "$WORKSPACE_DIR/home/"
+    chmod -R u+rw "$WORKSPACE_DIR/home/"
+fi
+
+echo "$(id -un):x:$(id -u):$(id -g):Isolated User:/workspace/home:/bin/bash" > "$WORKSPACE_DIR/tmp/passwd"
+echo "$(id -gn):x:$(id -g):$(id -un)" > "$WORKSPACE_DIR/tmp/group"
+
+BWRAP_OS_ARGS=()
+BWRAP_SYMLINK_ARGS=()
+declare -A SEEN_DIRS
+
+IFS=':' read -ra PATH_DIRS <<< "$PATH"
+ALL_DIRS=(/usr /lib /lib32 /lib64 /bin /sbin /etc /opt "${PATH_DIRS[@]}")
+
+for dir in "${ALL_DIRS[@]}"; do
+     if [ -z "$dir" ] || [ "$dir" == "/" ] || [ ! -e "$dir" ]; then continue; fi
+
+     # Handle usrmerge symlinks (Debian 13+): /bin->/usr/bin, etc.
+     # Use bwrap --symlink to recreate them inside the sandbox.
+     if [ -L "$dir" ]; then
+          if [ -z "${SEEN_DIRS[$dir]}" ]; then
+               BWRAP_SYMLINK_ARGS+=("--symlink" "$(readlink "$dir")" "$dir")
+               SEEN_DIRS[$dir]=1
+          fi
+          continue
+     fi
+
+     real_dir="$(realpath -m "$dir")"
+
+     if [[ "$real_dir" == */bin ]] || [[ "$real_dir" == */sbin ]]; then
+          prefix_dir="$(dirname "$real_dir")"
+          if [ -d "$prefix_dir" ] && [ "$prefix_dir" != "/" ] && [ -z "${SEEN_DIRS[$prefix_dir]}" ]; then
+               BWRAP_OS_ARGS+=("--ro-bind" "$prefix_dir" "$prefix_dir")
+               SEEN_DIRS[$prefix_dir]=1
+          fi
+     fi
+
+     if [ -d "$real_dir" ] && [ -z "${SEEN_DIRS[$real_dir]}" ]; then
+          BWRAP_OS_ARGS+=("--ro-bind" "$real_dir" "$real_dir")
+          SEEN_DIRS[$real_dir]=1
+     fi
+done
+
+CMD_EXEC=$(echo "$CMD" | awk '{print $1}')
+CMD_BIN=$(command -v "$CMD_EXEC" || true)
+
+if [ -z "$CMD_BIN" ]; then
+     zenity --error --title="Missing Application" \
+          --text="Error: '$CMD_EXEC' is not installed or not found in the server's PATH."
+     exit 1
+fi
+
+CMD_REAL="$(realpath -m "$CMD_BIN")"
+CMD_PREFIX="$(dirname "$(dirname "$CMD_REAL")")"
+
+if [ -d "$CMD_PREFIX" ] && [ -z "${SEEN_DIRS[$CMD_PREFIX]}" ] && [ "$CMD_PREFIX" != "/" ]; then
+     BWRAP_OS_ARGS+=("--ro-bind" "$CMD_PREFIX" "$CMD_PREFIX")
+     SEEN_DIRS[$CMD_PREFIX]=1
+fi
+
+
+# Removed the %q escaping on the full command string to preserve argument separation
+CMD_SANDBOXED="${CMD/$CMD_EXEC/$CMD_REAL}"
+
+LAUNCHER_SCRIPT="$WORKSPACE_DIR/launch_sandbox.sh"
+
+cat << EOF > "$LAUNCHER_SCRIPT"
+#!/bin/bash
+WORKSPACE_DIR="$WORKSPACE_DIR"
+CMD_SANDBOXED="$CMD_SANDBOXED"
+
+BWRAP_DISPLAY_ARGS=()
+ACTIVE_XAUTH="\${XAUTHORITY:-\$HOME/.Xauthority}"
+
+if [ -f "\$ACTIVE_XAUTH" ]; then
+     cp "\$ACTIVE_XAUTH" "\$WORKSPACE_DIR/home/.Xauthority"
+     BWRAP_DISPLAY_ARGS+=(
+          "--bind" "/tmp/.X11-unix" "/tmp/.X11-unix"
+          "--setenv" "XAUTHORITY" "/workspace/home/.Xauthority"
+          "--setenv" "DISPLAY" "\$DISPLAY"
+     )
+fi
+
+exec bwrap \\
+     --unshare-pid \\
+EOF
+
+for arg in "${BWRAP_OS_ARGS[@]}"; do
+     printf '     %q \\\n' "$arg" >> "$LAUNCHER_SCRIPT"
+done
+
+# Symlink args must come after bind mounts so targets exist (e.g. /usr/bin)
+for arg in "${BWRAP_SYMLINK_ARGS[@]}"; do
+     printf '     %q \\\n' "$arg" >> "$LAUNCHER_SCRIPT"
+done
+
+cat << 'EOF' >> "$LAUNCHER_SCRIPT"
+     --ro-bind "$WORKSPACE_DIR/tmp/passwd" /etc/passwd \
+     --ro-bind "$WORKSPACE_DIR/tmp/group" /etc/group \
+     --dev-bind /dev /dev \
+     --proc /proc \
+     --tmpfs /run \
+     --tmpfs /var \
+     --bind "$WORKSPACE_DIR" /workspace \
+     --bind "$WORKSPACE_DIR/tmp" /tmp \
+     "${BWRAP_DISPLAY_ARGS[@]}" \
+     --setenv HOME "/workspace/home" \
+     --setenv XDG_RUNTIME_DIR "/tmp" \
+     --chdir "/workspace/home" \
+     bash -c "dbus-run-session $CMD_SANDBOXED"
+EOF
+
+chmod +x "$LAUNCHER_SCRIPT"
+
+if [ "${1:-}" == "--dry-run" ]; then
+     echo "=== Generated launcher script ==="
+     cat "$LAUNCHER_SCRIPT"
+     echo ""
+     echo "=== Workspace: $WORKSPACE_DIR ==="
+     echo "=== To test bwrap directly on a compute node: ==="
+     echo "  srun -p interactive --x11 --ntasks=1 --cpus-per-task=12 --mem=32G --pty bash"
+     echo "  # Then run: $LAUNCHER_SCRIPT"
+     echo ""
+     echo "=== Or to test without Slurm (on login node): ==="
+     echo "  $LAUNCHER_SCRIPT"
+     exit 0
+fi
+
+# Default SLURM settings
+SLURM_PARTITION="interactive"
+SLURM_CPUS="12"
+SLURM_MEM="32G"
+SLURM_NODE=""
+
+# Launch mode: Quick Launch (defaults) or Configure
+LAUNCH_MODE=$(zenity --list --radiolist \
+     --title="Launch Mode" \
+     --text="How would you like to launch $CHOICE?" \
+     --column="Select" --column="Mode" --column="Description" \
+     --print-column=2 \
+     --width=450 --height=250 \
+     "TRUE"  "quick"     "Quick Launch (12 CPUs, 32G RAM)" \
+     "FALSE" "configure" "Configure SLURM settings" \
+     2>/dev/null | awk -F'|' '{print $NF}')
+
+if [ -z "$LAUNCH_MODE" ]; then exit 1; fi
+
+if [ "$LAUNCH_MODE" == "configure" ]; then
+     SETTINGS=$(zenity --forms --title="SLURM Settings" \
+          --text="Configure resources for $CHOICE" \
+          --add-combo="Node (blank = any)" \
+               --combo-values="|pxgpu02|pxgpu04|pxproc08|pxproc09|pxproc10|pxproc12|bl121proc01|bl121proc02|bl121proc03|bl121proc04" \
+          --add-entry="CPUs per task (default: 12)" \
+          --add-entry="Memory (default: 32G)" \
+          2>/dev/null)
+
+     if [ -z "$SETTINGS" ]; then exit 1; fi
+
+     IFS='|' read -r S_NODE S_CPUS S_MEM <<< "$SETTINGS"
+     [ -n "$S_NODE" ] && SLURM_NODE="$S_NODE"
+     [ -n "$S_CPUS" ] && SLURM_CPUS="$S_CPUS"
+     [ -n "$S_MEM" ]  && SLURM_MEM="$S_MEM"
+fi
+
+SLURM_ARGS=(
+  "--x11"
+  "--ntasks=1"
+  "--cpus-per-task=$SLURM_CPUS"
+  "--mem=$SLURM_MEM"
+)
+[ -n "$SLURM_NODE" ] && SLURM_ARGS+=("--nodelist=$SLURM_NODE")
+
+if srun -p "$SLURM_PARTITION" "${SLURM_ARGS[@]}" "$LAUNCHER_SCRIPT" > "$WORKSPACE_DIR/app.log" 2>&1; then
+  sleep 0.25                
+  rm -rf "$WORKSPACE_DIR"
+  if [ "$CHOICE" == "moe" ]; then
+     module unload moe
+  fi
+else
+  zenity --warning \
+       --title="Application Error" \
+       --text="The application '$CMD_EXEC' failed to execute via Slurm.\n\nThe workspace was preserved for debugging at:\n$WORKSPACE_DIR\n\nPlease check 'app.log' inside it to see what failed."
+fi

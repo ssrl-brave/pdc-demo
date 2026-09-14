@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PDC Demo
+Comment=Sync folder to pxslogin and run slurmlauncher
+Exec=bash -c 'DIR=/home/sw/pdc-demo && CP="/tmp/ssh_sl_$(date +%%s)_$$" && ssh -o ControlMaster=auto -o ControlPath="$CP" -o ControlPersist=60 pxslogin "mkdir -p ~/.slurmlauncher_tmp" && scp -o ControlPath="$CP" -r "$DIR"/. pxslogin:~/.slurmlauncher_tmp/ && ssh -t -Y -o ControlPath="$CP" pxslogin "cd ~/.slurmlauncher_tmp && ./launcher/slurmlauncher"'
+Icon=pdc-demo
+Terminal=false
+Categories=Utility;
+
+
+Path=
+StartupNotify=false
