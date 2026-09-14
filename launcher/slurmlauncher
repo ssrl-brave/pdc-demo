@@ -35,10 +35,6 @@ if [ -z "$CMD" ]; then
      exit 1
 fi
 
-if [ "$CHOICE" == "moe" ]; then
-     module load moe
-fi
-
 mkdir -p "$WORKSPACE_DIR"/{home,tmp}
 
 APP_TEMPLATE_DIR="$PROJECT_DIR/templates/$CHOICE"
@@ -215,6 +211,11 @@ SLURM_ARGS=(
   "--mem=$SLURM_MEM"
 )
 [ -n "$SLURM_NODE" ] && SLURM_ARGS+=("--nodelist=$SLURM_NODE")
+
+# Load module AFTER all zenity dialogs (module load moe clobbers LD_LIBRARY_PATH, breaking GTK)
+if [ "$CHOICE" == "moe" ]; then
+     module load moe
+fi
 
 if srun -p "$SLURM_PARTITION" "${SLURM_ARGS[@]}" "$LAUNCHER_SCRIPT" > "$WORKSPACE_DIR/app.log" 2>&1; then
   sleep 0.25                
