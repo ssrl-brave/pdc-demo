@@ -35,6 +35,15 @@ if [ -z "$CMD" ]; then
      exit 1
 fi
 
+# Load module early for PATH/command resolution, but preserve LD_LIBRARY_PATH
+# so zenity (GTK) keeps working — module load moe clobbers it
+_SAVED_LDLP="${LD_LIBRARY_PATH:-}"
+if [ "$CHOICE" == "moe" ]; then
+     module load moe
+fi
+_MOE_LDLP="${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$_SAVED_LDLP"
+
 mkdir -p "$WORKSPACE_DIR"/{home,tmp}
 
 APP_TEMPLATE_DIR="$PROJECT_DIR/templates/$CHOICE"
@@ -212,9 +221,9 @@ SLURM_ARGS=(
 )
 [ -n "$SLURM_NODE" ] && SLURM_ARGS+=("--nodelist=$SLURM_NODE")
 
-# Load module AFTER all zenity dialogs (module load moe clobbers LD_LIBRARY_PATH, breaking GTK)
+# Restore MOE's LD_LIBRARY_PATH now that all zenity dialogs are done
 if [ "$CHOICE" == "moe" ]; then
-     module load moe
+     export LD_LIBRARY_PATH="$_MOE_LDLP"
 fi
 
 if srun -p "$SLURM_PARTITION" "${SLURM_ARGS[@]}" "$LAUNCHER_SCRIPT" > "$WORKSPACE_DIR/app.log" 2>&1; then
